@@ -1,23 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-gmail_hybrid_manager.py — Windows-only (v3.6.1)
+gm.py — Windows-only (v3.6.1-custom)
 
-This version:
-- Adds a "Browse…" button to load Gmail accounts from a text file (one per line).
-  * If a file is selected, the accounts textarea is disabled and ignored.
-  * "Clear file" returns to manual entry.
-  * Full path is shown in the UI (dark theme, integrated).
-- Uses resource_path() for credentials.json so OAuth works regardless of CWD.
-- GUI: separates actions into bordered boxes that match the app theme:
-  * Chrome actions box (Open Gmail UI, Shorts + inline #, Click links + inline #)
-  * API actions box (NOT SPAM, IMPORTANT)
-  * Concurrency box at the bottom (Max concurrent Chrome sessions)
-- Keeps the rest of v3.6.1 behavior intact.
-- Stability:
-  * Profile auto-repair (Preferences/Local State JSONs) before launch
-  * Profile lock detection/wait to avoid corruption
-  * Graceful Browser.close over CDP, with terminate/kill as fallback
+Changes in this build:
+- Click links: uses CDP Target.createTarget to open links in new tabs (no popup blocking).
+- Opens links 2s apart, then waits for all to load (up to 30s total) before closing Chrome.
+- "Open Gmail UI (always)" keeps Chrome open; other actions can still close.
+- Browse… button to select accounts file; disables textarea when a file is selected.
+- Boxed, themed GUI groups for Chrome actions, API actions, and Concurrency.
+- Credentials path resolved via resource_path so OAuth works regardless of CWD.
+
+Note: This is a consolidated single-file script compatible with your previous v3.6.1 code path.
 """
 
 import os
@@ -99,49 +93,6 @@ def resource_path(relative: str) -> Path:
 # Make a canonical credentials path that works regardless of CWD
 CREDENTIALS_PATH = resource_path(CREDENTIALS_FILE)
 
-# ===== Shorts discovery =====
-SHORTS_SEARCH_QUERIES = [
-    "shorts", "trending shorts", "viral shorts", "funny shorts", "music shorts",
-    "gaming shorts", "tech shorts", "life hacks shorts", "satisfying shorts",
-    "fails shorts", "football shorts", "basketball shorts", "soccer shorts",
-    "science shorts", "learning shorts", "pet shorts", "cat shorts", "dog shorts",
-    "memes shorts", "asmr shorts", "movie shorts", "clip shorts", "travel shorts",
-    "food shorts", "cooking shorts", "art shorts", "animation shorts",
-]
-SHORTS_REGEX = re.compile(r"/shorts/([A-Za-z0-9_-]{8,})")
-
-def fetch_shorts_links(max_links=50, log_fn=print, exclude_ids=None):
-    if exclude_ids is None:
-        exclude_ids = set()
-    found_urls = []
-    found_ids = set()
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/118.0 Safari/537.36"
-    }
-    queries = SHORTS_SEARCH_QUERIES[:]
-    random.shuffle(queries)
-    for q in queries:
-        try:
-            url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(q)}"
-            log_fn(f"[SHORTS] fetching search: {q}")
-            r = requests.get(url, headers=headers, timeout=10)
-            if r.status_code != 200:
-                log_fn(f"[SHORTS] search {q} returned {r.status_code}")
-                continue
-            matches = SHORTS_REGEX.findall(r.text)
-            random.shuffle(matches)
-            for sid in matches:
-                if sid in found_ids or sid in exclude_ids:
-                    continue
-                found_ids.add(sid)
-                found_urls.append(f"https://www.youtube.com/shorts/{sid}")
-                if len(found_urls) >= max_links:
-                    return found_urls
-            time.sleep(0.3)
-        except Exception as e:
-            log_fn(f"[SHORTS][ERROR] {e}")
-            continue
-    return found_urls
 
 # ===== Extract master Chrome =====
 def ensure_master_extracted(log_fn=print) -> bool:
@@ -325,7 +276,7 @@ def _wait_profile_unlock(profile_dir: Path, timeout: float, log_fn=print) -> boo
     return True
 
 
-# Provide public wrappers matching earlier calls
+# Provide public wrappers
 def repair_profile(profile_dir: Path, log_fn=print):
     return _repair_profile_if_corrupted(profile_dir, log_fn=log_fn)
 
@@ -927,7 +878,7 @@ class GmailHybridApp(tk.Tk):
         )
         self.accounts_box.pack(fill=tk.X, padx=2, pady=4)
 
-        # ---- Browse/Clear row (Switch Mode) under the accounts textbox ----
+        # ---- Browse/Clear row ----
         accounts_file_row = tk.Frame(left, bg="#2b2b2b")
         accounts_file_row.pack(fill=tk.X, pady=(2, 0))
 
@@ -942,7 +893,6 @@ class GmailHybridApp(tk.Tk):
         )
         self.btn_browse_accounts.pack(side="left")
 
-        # FULL PATH display when a file is selected
         self.accounts_file_label = tk.Label(
             accounts_file_row,
             text="",
@@ -963,7 +913,6 @@ class GmailHybridApp(tk.Tk):
         )
         self.btn_clear_accounts.pack(side="right")
         self.btn_clear_accounts.pack_forget()  # hidden until a file is selected
-        # -------------------------------------------------------------------
 
         sub = tk.Frame(left, bg="#2b2b2b")
         sub.pack(fill=tk.X, pady=6)
@@ -991,7 +940,7 @@ class GmailHybridApp(tk.Tk):
         )
         self.search_entry.grid(row=1, column=1, sticky="we", padx=6)
 
-        # Right side root (column container)
+        # Right side
         right = tk.Frame(
             main_frame,
             bg="#2b2b2b",
@@ -1196,7 +1145,6 @@ class GmailHybridApp(tk.Tk):
 
     # === File mode handlers ===
     def _browse_accounts_file(self):
-        """Switch to file mode: pick a .txt file (one email per line), disable textbox, show full path."""
         path = filedialog.askopenfilename(
             title="Select file containing Gmail accounts (one per line)",
             filetypes=(("Text Files", "*.txt"), ("All Files", "*.*")),
@@ -1211,10 +1159,9 @@ class GmailHybridApp(tk.Tk):
         self.accounts_file_label.config(
             text=f"Loaded from: {path}  (textarea disabled)"
         )
-        self.btn_clear_accounts.pack(side="right")  # reveal "Clear file" button
+        self.btn_clear_accounts.pack(side="right")
 
     def _clear_accounts_file(self):
-        """Return to manual mode: clear file selection, re-enable textbox."""
         self.accounts_file = None
         self.accounts_file_label.config(text="")
         try:
@@ -1224,7 +1171,6 @@ class GmailHybridApp(tk.Tk):
         self.btn_clear_accounts.pack_forget()
 
     def _on_action_toggled(self):
-        # Enable/disable numeric fields next to checkboxes
         self.shorts_count_entry.config(state=tk.NORMAL if self.var_play_shorts.get() else tk.DISABLED)
         self.click_links_count_entry.config(state=tk.NORMAL if self.var_click_links.get() else tk.DISABLED)
 
@@ -1243,7 +1189,7 @@ class GmailHybridApp(tk.Tk):
     def clear_log(self):
         self.log_box.delete("1.0", tk.END)
 
-    # === Start button → spawn worker thread (keeps UI responsive) ===
+    # === Start button → spawn worker thread ===
     def on_start(self):
         self.start_btn.config(state=tk.DISABLED)
         threading.Thread(
@@ -1338,7 +1284,6 @@ class GmailHybridApp(tk.Tk):
             )
 
             def _thread_entry(acct, delay_idx, opts_local):
-                # Soft stagger to reduce simultaneous Chrome spawn spikes
                 if delay_idx > 0:
                     time.sleep(0.25 * delay_idx)
                 self._process_one_account(acct, opts_local, self.log_threadsafe)
@@ -1366,7 +1311,7 @@ class GmailHybridApp(tk.Tk):
         try:
             log_fn(f"--- Processing: {email} ---")
 
-            # 1) Start Chrome session (creates profile if needed)
+            # 1) Start Chrome session
             sess = start_chrome_session(email, log_fn=log_fn)
             if not sess:
                 log_fn("[SESSION][FATAL] Could not start Chrome.")
@@ -1399,7 +1344,8 @@ class GmailHybridApp(tk.Tk):
                 gmail_svc = build_gmail_service(creds)
             except Exception as e:
                 log_fn(f"[GMAIL][ERROR] build service: {e}")
-                close_chrome_session(sess, log_fn)
+                if not opts.get("open_gmail_ui"):
+                    close_chrome_session(sess, log_fn)
                 return
 
             try:
@@ -1437,14 +1383,13 @@ class GmailHybridApp(tk.Tk):
                     open_interval=2.0, wait_after_open=30.0, log_fn=log_fn
                 )
 
-            # 8) All done → close or keep Chrome based on user choice
+            # 5) Close or keep session
             if opts.get("open_gmail_ui"):
                 log_fn(f"[SESSION] kept open for {email} (Open Gmail UI enabled)")
             else:
                 close_chrome_session(sess, log_fn)
                 log_fn(f"[SESSION] closed for {email} (UI not required)")
             log_fn(f"--- Done: {email} ---\n")
-
 
         except Exception as e:
             log_fn(f"[FATAL] {email}: {e}")
@@ -1487,11 +1432,51 @@ class GmailHybridApp(tk.Tk):
             except Exception as e:
                 log_fn(f"[CONTACT][ERROR] {addr}: {e}")
 
-    # === YouTube Shorts Playback (basic; preserves your behavior) ===
+    # === YouTube Shorts Playback (basic) ===
+    SHORTS_SEARCH_QUERIES = [
+        "shorts", "trending shorts", "viral shorts", "funny shorts", "music shorts",
+        "gaming shorts", "tech shorts", "life hacks shorts", "satisfying shorts",
+        "fails shorts", "football shorts", "basketball shorts", "soccer shorts",
+        "science shorts", "learning shorts", "pet shorts", "cat shorts", "dog shorts",
+        "memes shorts", "asmr shorts", "movie shorts", "clip shorts", "travel shorts",
+        "food shorts", "cooking shorts", "art shorts", "animation shorts",
+    ]
+    SHORTS_REGEX = re.compile(r"/shorts/([A-Za-z0-9_-]{8,})")
+
+    def _fetch_shorts_links(self, max_links=50, log_fn=print, exclude_ids: Set[str] | None = None):
+        exclude_ids = exclude_ids or set()
+        found_urls: List[str] = []
+        found_ids: Set[str] = set()
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                 "AppleWebKit/537.36 Chrome/118.0 Safari/537.36"}
+        queries = self.SHORTS_SEARCH_QUERIES[:]
+        random.shuffle(queries)
+        for q in queries:
+            try:
+                url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(q)}"
+                log_fn(f"[SHORTS] fetching search: {q}")
+                r = requests.get(url, headers=headers, timeout=10)
+                if r.status_code != 200:
+                    log_fn(f"[SHORTS] search {q} returned {r.status_code}")
+                    continue
+                matches = self.SHORTS_REGEX.findall(r.text)
+                random.shuffle(matches)
+                for sid in matches:
+                    if sid in found_ids or sid in exclude_ids:
+                        continue
+                    found_ids.add(sid)
+                    found_urls.append(f"https://www.youtube.com/shorts/{sid}")
+                    if len(found_urls) >= max_links:
+                        return found_urls
+                time.sleep(0.3)
+            except Exception as e:
+                log_fn(f"[SHORTS][ERROR] {e}")
+                continue
+        return found_urls
+
     def _play_youtube_shorts(self, email, ws_url, count, log_fn=print):
-        # Fetch some shorts links
         ids_seen: Set[str] = set()
-        links = fetch_shorts_links(max_links=max(10, count*3), log_fn=log_fn, exclude_ids=ids_seen)
+        links = self._fetch_shorts_links(max_links=max(10, count*3), log_fn=log_fn, exclude_ids=ids_seen)
         if not links:
             log_fn("[SHORTS] no results")
             return
@@ -1500,10 +1485,9 @@ class GmailHybridApp(tk.Tk):
         for url in links:
             log_fn(f"[SHORTS] opening: {url}")
             cdp_navigate(ws_url, url, wait_load=True, timeout=20, log_fn=log_fn)
-            # Minimal dwell consistent with prior requests
             time.sleep(2.0)
 
-    # === Click Links from Unread Emails ===
+    # === Click Links from Unread Emails (popup-proof) ===
     def _click_unread_links(
         self,
         email: str,
@@ -1514,7 +1498,6 @@ class GmailHybridApp(tk.Tk):
         wait_after_open=30.0,
         log_fn=print,
     ):
-        # Fetch unread messages in Inbox only
         messages = search_messages(gmail_svc, "is:unread in:inbox", max_results=200, log_fn=log_fn)
         if not messages:
             log_fn("[LINKS] No unread emails found.")
@@ -1542,12 +1525,8 @@ class GmailHybridApp(tk.Tk):
 
             walk(payload)
             all_text = "\n".join(texts)
-            # crude URL extraction
             links = re.findall(r'(https?://[^\s"\'<>]+)', all_text)
-            cleaned = []
-            for u in links:
-                cleaned.append(u.rstrip(").,;'\"!?]"))
-            # Dedup preserve order
+            cleaned = [u.rstrip(").,;'\"!?]") for u in links]
             seen = set()
             uniq = []
             for u in cleaned:
@@ -1556,7 +1535,6 @@ class GmailHybridApp(tk.Tk):
                     uniq.append(u)
             return uniq
 
-        # Gather valid URLs from unread messages
         urls: List[str] = []
         for itm in messages:
             try:
@@ -1580,77 +1558,115 @@ class GmailHybridApp(tk.Tk):
 
         log_fn(f"[LINKS] Found {len(urls)} link(s) — opening them 2s apart…")
 
-        # Open Gmail inbox first and keep it open
-        cdp_navigate(ws_url, "https://mail.google.com/mail/u/0/#inbox", log_fn=log_fn)
+        if websocket is None:
+            log_fn("[LINKS][ERROR] websocket-client not installed.")
+            return
+        try:
+            ws = websocket.create_connection(ws_url, timeout=8)
+        except Exception as e:
+            log_fn(f"[CDP][ERROR] connect failed: {e}")
+            return
 
-        # Use window.open to force new tabs (inline JS via CDP)
-        def _cdp_eval(ws_url: str, js: str, wait=6.0):
-            try:
-                ws = websocket.create_connection(ws_url, timeout=8)
-            except Exception as e:
-                log_fn(f"[CDP] eval connect failed: {e}")
-                return None
-            try:
-                _send_cdp_cmd(ws, "Runtime.enable")
-                eval_id = _send_cdp_cmd(
-                    ws,
-                    "Runtime.evaluate",
-                    {"expression": js, "awaitPromise": True, "returnByValue": True},
-                )
-                deadline = time.time() + wait
-                while time.time() < deadline:
-                    try:
-                        msg = ws.recv()
-                        m = json.loads(msg)
-                    except Exception:
-                        continue
-                    if m.get("id") == eval_id:
-                        return (m.get("result", {}) or {}).get("result", {}).get("value")
-            except Exception as e:
-                log_fn(f"[CDP] eval error: {e}")
-            finally:
+        def cdp_send(method, params=None, _id_gen=[2000]):
+            if params is None:
+                params = {}
+            _id_gen[0] += 1
+            msg = {"id": _id_gen[0], "method": method, "params": params}
+            ws.send(json.dumps(msg))
+            return _id_gen[0]
+
+        def cdp_recv(timeout=1.0):
+            end = time.time() + timeout
+            while time.time() < end:
                 try:
-                    ws.close()
+                    raw = ws.recv()
                 except Exception:
-                    pass
+                    return None
+                try:
+                    return json.loads(raw)
+                except Exception:
+                    continue
             return None
 
+        # Enable target auto-attach so we can receive per-tab events
+        cdp_send("Target.setAutoAttach", {
+            "autoAttach": True,
+            "waitForDebuggerOnStart": False,
+            "flatten": True
+        })
+
+        # Open inbox first
+        cdp_send("Page.enable")
+        cdp_send("Page.navigate", {"url": "https://mail.google.com/mail/u/0/#inbox"})
+        log_fn("[LINKS] Inbox opened.")
+        time.sleep(1.0)
+
+        # Create new tabs for each URL
+        opened_session_ids = set()
+        for i, url in enumerate(urls):
+            if i > 0:
+                time.sleep(open_interval)
+            create_id = cdp_send("Target.createTarget", {"url": url})
+            # Capture the auto-attached sessionId from Target.attachedToTarget
+            # (flattened sessions emit messages with "sessionId")
+            created = False
+            end_wait = time.time() + 4.0
+            while time.time() < end_wait:
+                msg = cdp_recv(0.8)
+                if not msg:
+                    continue
+                if msg.get("method") == "Target.attachedToTarget":
+                    sid = msg.get("sessionId")
+                    if sid:
+                        opened_session_ids.add(sid)
+                        created = True
+                        break
+            log_fn(f"[LINKS] opened: {url}" if created else f"[LINKS][WARN] no session for: {url}")
+
+        if not opened_session_ids:
+            log_fn("[LINKS] No tabs were opened (no sessions observed).")
             try:
-                ws = websocket.create_connection(ws_url, timeout=10)
-            except Exception as e:
-                log_fn(f"[CDP] Could not connect to CDP for link opening: {e}")
-                return
+                ws.close()
+            except:
+                pass
+            return
 
-            for i, u in enumerate(urls):
-                if i > 0:
-                    time.sleep(open_interval)
-                try:
-                    log_fn(f"[LINKS] Opening in new tab via CDP: {u}")
-                    _send_cdp_cmd(ws, "Target.createTarget", {"url": u})
-                except Exception as e:
-                    log_fn(f"[LINKS][ERROR] {u}: {e}")
+        # Wait until all tabs load or timeout
+        log_fn("[LINKS] waiting for all tabs to finish loading…")
+        pending = set(opened_session_ids)
+        deadline = time.time() + wait_after_open
+        while pending and time.time() < deadline:
+            msg = cdp_recv(1.0)
+            if not msg:
+                continue
+            if msg.get("method") == "Page.loadEventFired":
+                sid = msg.get("sessionId")
+                if sid in pending:
+                    pending.remove(sid)
 
+        if pending:
+            log_fn(f"[LINKS] Timeout; still waiting on {len(pending)} tab(s).")
+        else:
+            log_fn("[LINKS] All tabs loaded successfully.")
+
+        try:
             ws.close()
-            
-        # Wait for tabs to load (best-effort): wait a fixed window
-        log_fn("[LINKS] waiting on all tabs to load…")
-        time.sleep(wait_after_open)
+        except:
+            pass
 
     @staticmethod
     def _is_valid_web_link(url: str) -> bool:
         url_l = url.lower()
         if not url_l.startswith("http"):
             return False
-        # Filter out common media extensions
         bad_ext = (".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp", ".mp4", ".mov", ".avi", ".mkv")
         return not any(url_l.endswith(ext) for ext in bad_ext)
 
     # ===== End of class =====
 
 
-# ===== Simple update checker (stub to avoid NameError if referenced) =====
+# ===== Simple update checker (stub) =====
 def check_for_update_and_prompt(parent_window=None):
-    """Stubbed during development; no-op to avoid NameError in GUI init."""
     return
 
 
